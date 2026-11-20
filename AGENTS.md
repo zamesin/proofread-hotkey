@@ -10,6 +10,9 @@ Proofread Hotkey is a macOS menu-bar app: a global keyboard shortcut sends the c
 
 2. **Get the code.** If you are not inside a clone of this repository yet, clone it to a permanent place, not to a temporary folder (updates are pulled there later):
    `git clone https://github.com/zamesin/proofread-hotkey.git ~/proofread-hotkey`
+   If `xcode-select -p` fails, this Mac has no Xcode Command Line Tools and `git` would only open an install dialog. Do not start that install. Download the code without git instead:
+   `mkdir -p ~/proofread-hotkey` and then `curl -fsSL https://github.com/zamesin/proofread-hotkey/archive/refs/heads/main.tar.gz | tar -xz --strip-components 1 -C ~/proofread-hotkey`
+   (To update such a copy later, run the same `curl` command again and then `./install.sh`.)
 
 3. **Install.** Run `./install.sh` in the repository folder. It builds the app from `Sources/` when the Xcode Command Line Tools are present (about 30 seconds), otherwise it downloads the ready app from GitHub Releases. Then it copies `Proofread Hotkey.app` to `/Applications` (or `~/Applications`), starts it and prints which of the two CLIs it found. Do not use `sudo`.
 
