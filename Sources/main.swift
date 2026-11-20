@@ -20,9 +20,10 @@ func log(_ line: String) {
 // MARK: - Prompt
 
 let changesMark = "===CHANGES==="
+let textMark = "TEXT TO EDIT:" // the first line of what the model gets; without it Claude Code takes a text that starts with "/" for its own command
 
 let defaultPrompt = """
-You are a native US English editor. The user message is a text written by a non-native speaker: a comment, a post, an email or a chat message. Edit it.
+You are a native US English editor. The user message holds a text written by a non-native speaker: a comment, a post, an email or a chat message. The text is everything after the first line "\(textMark)". Edit it.
 If the whole text is in another language, edit it in that language and keep that language.
 If the text is mostly English but has words or phrases in another language mixed in (the author types them when they don't know the English), translate every such part into natural US English that fits the sentence, so the result is fully English.
 Fix spelling, grammar, punctuation and articles. Also rewrite every word or phrase that a native speaker would not say, even if it is grammatically correct (for example "the value the product is creating" → "the value the product creates").
@@ -58,8 +59,8 @@ struct Change {
 /// Splits the model's answer into the corrected text and the list of edits. A missing or broken list means "no list".
 func parseAnswer(_ raw: String) -> (text: String, changes: [Change]) {
   var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-  if s.hasPrefix("```"), let nl = s.firstIndex(of: "\n") { s = String(s[s.index(after: nl)...]) }
-  if s.hasSuffix("```") { s = String(s.dropLast(3)) }
+  // a code fence around the whole answer is dropped; a text that only starts with one is the author's own
+  if s.hasPrefix("```"), s.hasSuffix("```"), s.count > 6, let nl = s.firstIndex(of: "\n") { s = String(s[s.index(after: nl)...].dropLast(3)) }
   guard let markRange = s.range(of: changesMark, options: .backwards) else { return (s.trimmingCharacters(in: .whitespacesAndNewlines), []) }
   let text = String(s[..<markRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
   let tail = String(s[markRange.upperBound...])
@@ -126,12 +127,16 @@ enum Shell {
     let group = DispatchGroup()
     DispatchQueue.global().async(group: group) { outData = outPipe.fileHandleForReading.readDataToEndOfFile() }
     DispatchQueue.global().async(group: group) { errData = errPipe.fileHandleForReading.readDataToEndOfFile() }
-    inPipe.fileHandleForWriting.write(Data(stdin.utf8))
+    // the child may exit before it reads everything: the write then fails instead of killing the app (SIGPIPE is ignored at start)
+    try? inPipe.fileHandleForWriting.write(contentsOf: Data(stdin.utf8))
     try? inPipe.fileHandleForWriting.close()
     let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+    let hardKiller = DispatchWorkItem { if p.isRunning { kill(p.processIdentifier, SIGKILL) } } // for a child that ignores the polite stop
     DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+    DispatchQueue.global().asyncAfter(deadline: .now() + timeout + 3, execute: hardKiller)
     p.waitUntilExit()
     killer.cancel()
+    hardKiller.cancel()
     group.wait()
     return (p.terminationStatus, String(decoding: outData, as: UTF8.self), String(decoding: errData, as: UTF8.self))
   }
@@ -159,21 +164,23 @@ func proofread(_ text: String, engine: Engine, done: @escaping (Result<(text: St
       switch engine {
       case .claude:
         let model = defaults.string(forKey: "claudeModel") ?? "sonnet"
-        run = try Shell.run(bin, ["-p", "--model", model, "--output-format", "text", "--system-prompt", prompt, "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--setting-sources", ""], stdin: text, env: env, cwd: work, timeout: 90)
+        run = try Shell.run(bin, ["-p", "--model", model, "--output-format", "text", "--system-prompt", prompt, "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--setting-sources", ""], stdin: textMark + "\n" + text, env: env, cwd: work, timeout: 90)
         raw = run.stdout
       case .codex:
         let out = work.appendingPathComponent("codex-\(UUID().uuidString).txt")
-        var args = ["exec", "--skip-git-repo-check", "-s", "read-only", "--ephemeral", "--ignore-user-config", "-c", "model_reasoning_effort=low", "-o", out.path]
+        var args = ["exec", "--skip-git-repo-check", "-s", "read-only", "--ephemeral", "--ignore-user-config", "-c", "model_reasoning_effort=low", "-c", "features.shell_tool=false", "-c", "features.unified_exec=false", "-o", out.path]
         if let model = defaults.string(forKey: "codexModel") { args += ["-m", model] }
-        run = try Shell.run(bin, args + ["-"], stdin: prompt + "\n\nTEXT:\n" + text, env: env, cwd: work, timeout: 90)
+        run = try Shell.run(bin, args + ["-"], stdin: prompt + "\n\n" + textMark + "\n" + text, env: env, cwd: work, timeout: 90)
         raw = (try? String(contentsOf: out, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(at: out)
       }
       log("engine=\(engine.rawValue) exit=\(run.status) seconds=\(String(format: "%.1f", Date().timeIntervalSince(started))) outChars=\(raw.count)")
       let answer = parseAnswer(raw)
       if run.status != 0 || answer.text.isEmpty {
-        let detail = (run.stderr + "\n" + run.stdout).trimmingCharacters(in: .whitespacesAndNewlines).suffix(240)
-        log("engine error: \(detail)")
+        // the last lines of what the program printed, for the window only: the log never holds the person's text, and Codex repeats it in its output
+        let lines = (run.stdout + "\n" + run.stderr).split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let detail = String(lines.suffix(3).joined(separator: "\n").suffix(300))
+        log("engine error: exit=\(run.status) empty=\(answer.text.isEmpty)")
         let hint = detail.range(of: "login|auth|sign in|credential|401", options: [.regularExpression, .caseInsensitive]) != nil ? " Looks like you are not signed in: run `\(engine.binary)` in Terminal and sign in." : ""
         throw Failure(message: "\(engine == .claude ? "Claude" : "Codex") could not check the text.\(hint)\n\(detail)")
       }
@@ -514,7 +521,8 @@ final class Toast {
     if case .result = screen { last = screen }
     // the screen where the mouse is now: that is where the person works. The answer appears on the same screen as its "Checking…" window.
     let mouse = NSEvent.mouseLocation
-    var screenFrame = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+    guard let anyScreen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main ?? NSScreen.screens.first else { return } // no display attached
+    var screenFrame = anyScreen.visibleFrame
     if let kept = loadingScreenFrame, NSScreen.screens.contains(where: { $0.visibleFrame == kept }) { screenFrame = kept }
     if case .loading = screen { loadingScreenFrame = screenFrame } else { loadingScreenFrame = nil }
     // a long text on a small screen: show fewer lines of the texts so that the list of changes stays whole
@@ -750,6 +758,14 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func quit() { NSApp.terminate(nil) }
+}
+
+signal(SIGPIPE, SIG_IGN)
+if CommandLine.arguments.contains("--remove-login-item") {
+  // for uninstalling: macOS keeps the "start at login" record after the app is deleted, so remove it first
+  try? SMAppService.mainApp.unregister()
+  print("Start at login: \(SMAppService.mainApp.status == .enabled ? "still on" : "off")")
+  exit(0)
 }
 
 let app = NSApplication.shared
