@@ -11,16 +11,25 @@ You need a Claude or ChatGPT subscription and one extra free program. The sectio
 ## What happens when you press the shortcut
 
 1. You write a text anywhere: in a browser, in Slack, in Mail, in a chat.
-2. You copy the text (Command + C) and press **Command + Shift + ;** (the key with the semicolon). If you let the app press Command + C for you (see "Select the text instead of copying it"), you only select the text and press the shortcut.
+2. You select the text and press **Command + Shift + ;** (the key with the semicolon). This needs the macOS permission called Accessibility. The app asks for it on its first start (see "Let the app take the selected text and paste the fix"). Without the permission the app cannot see the selected text: you copy the text first (Command + C) and then press the shortcut. If you only select the text without the permission, the app checks whatever you copied earlier. Copying first also works with the permission: when nothing is selected, the app takes the text from the clipboard. Code editors are the exception, see item 5.
 3. The app gives the text to Claude or Codex. It uses Claude Code or Codex CLI. These are separate programs, not the usual Claude and ChatGPT apps, and you install one of them once (see "What you need"). The program is signed in with your account, so everything works on your existing subscription. You do not need a separate paid developer account, and you do not pay per request.
 4. While the check runs, a small window in the top-right corner of the screen says "Checking with Claude…" (or "Checking with Codex…") and shows your text. The check takes 4 to 10 seconds.
-5. Then the corrected text is copied for you, the same as if you had pressed Command + C on it. It replaces the text you copied before. You paste it (Command + V) wherever you want. The app never pastes, sends or publishes anything by itself.
+5. Then the app puts the corrected text in place of the text you selected. The corrected text is also copied, the same as if you had pressed Command + C on it, so you can paste it again (Command + V) anywhere. It replaces what was in the clipboard before. The app never presses Return or a Send button and never publishes anything: it only replaces the selected text in the field, and you decide what to do with it next.
+
+   The app does not paste, and only copies the corrected text, in these cases:
+   - while the check ran, you selected another text, typed over the selection or switched to another app (so the app never overwrites what you typed during the check);
+   - the text came from the clipboard: you copied it yourself and nothing was selected, or the app has no Accessibility permission;
+   - in a code editor (VS Code, Cursor, JetBrains apps) when nothing was selected. The app asks such an editor to copy the selection, and with no selection these editors copy the whole current line. So the app checks that line and does not paste the fix: pasting could duplicate the line.
+
+   Then you paste the corrected text yourself (Command + V) where you need it.
+
+   Any text the app pastes is plain text: links and bold in the selected part become plain text. If the check fails, the window shows an error and your selected text stays untouched.
 6. The window now shows three things:
    - the corrected text, where every new word has a green background;
    - the list "What changed": what you wrote, what it became, and a short reason, for example *“asap” → “ASAP”. Acronyms are written in capitals*;
    - your original text, where every replaced word has a red background.
 
-   If the text has no mistakes, the window says "No edits needed — copied".
+   The bold green line at the top of the window says "Fixed and pasted" when the app replaced the selected text, and "Fixed and copied" when it only copied the corrected text. If the text has no mistakes, that line says "No edits needed — copied": the window shows only your text, your text in the field stays as it was, and the same text is put into the clipboard.
 7. The window closes by itself after 5 seconds. A small ring in its top-right corner shows how much time is left. Put the mouse pointer over the window and the ring stops: the window stays while you read. Move the pointer away and the countdown goes on. A click on the window closes it at once.
 
 The window never becomes the active window. What you type still goes to the app you work in.
@@ -76,19 +85,26 @@ The third line puts **Proofread Hotkey** into your Applications folder and start
 
 ## Check that it works
 
-After the install you see a new icon in the menu bar at the top of the screen: lines of text with a check mark. Copy any English text, press Command + Shift + ; and look at the top-right corner of the screen. The window with the corrected text appears there.
+After the install you see a new icon in the menu bar at the top of the screen: lines of text with a check mark. Right after the first start macOS also shows a window about the Accessibility permission. Deal with it first: the next section tells what to do. Then copy any English text, press Command + Shift + ; and look at the top-right corner of the screen. The window with the corrected text appears there.
 
-## Select the text instead of copying it
+## Let the app take the selected text and paste the fix
 
-Right after the install the order is: you copy the text, then you press the shortcut. To skip the copying, let the app press Command + C for you:
+With the Accessibility permission you select a text in any field and press the shortcut, and the corrected text replaces the selected text. Without it you copy the text, press the shortcut and paste the corrected text yourself.
+
+On its first start the app asks macOS for this permission, and macOS shows a window about it:
+
+1. In that window click **Open System Settings**.
+2. System Settings opens at Privacy & Security → Accessibility. Turn on the switch next to Proofread Hotkey. macOS may ask for your password or Touch ID.
+
+If you clicked **Deny**, closed the window, or want to give the permission later:
 
 1. Click the app's icon in the menu bar.
-2. Choose **Take the selected text without ⌘C: allow…** (⌘ is the Command key).
+2. Choose **Take the selected text and paste the fix: allow…**
 3. macOS opens System Settings → Privacy & Security → Accessibility. Turn on the switch next to Proofread Hotkey.
 
-Now you select a text and press the shortcut. If the app still checks the old text, choose **Quit** in its menu and open Proofread Hotkey from the Applications folder again.
+When the permission is on, this menu item disappears. Now you select a text and press the shortcut. If the app still checks the text you copied earlier instead of the selected one, choose **Quit** in its menu and open Proofread Hotkey from the Applications folder again. Sometimes macOS needs this restart to apply the permission.
 
-The app needs this permission only to press Command + C in the active window. Without the permission everything else works the same.
+The app needs this permission for three things: to read the selected text in the active field, to press Command + C and Command + V in the active window (in browsers it takes and pastes the text this way), and to put the corrected text in place of the selection. It never moves the mouse pointer. Without the permission everything else works the same.
 
 ## The menu
 
@@ -129,7 +145,12 @@ git pull
 ./install.sh
 ```
 
-After an update macOS may forget that you let the app press Command + C. You notice this when you select a new text, press the shortcut, and the app checks an old text. Open System Settings → Privacy & Security → Accessibility, select the Proofread Hotkey line and remove it with the minus button. Then choose **Take the selected text without ⌘C: allow…** in the app's menu again.
+After an update macOS may forget the Accessibility permission. The switch next to Proofread Hotkey may still look on, but it belongs to the old copy of the app. You notice this when you select a new text, press the shortcut, and the app checks the text you copied earlier, or the window says "Fixed and copied" and the selected text is not replaced. To fix it:
+
+1. Open System Settings → Privacy & Security → Accessibility, select the Proofread Hotkey line and remove it with the minus button.
+2. Click the app's icon in the menu bar and choose **Take the selected text and paste the fix: allow…**
+3. Turn on the switch next to Proofread Hotkey.
+4. Choose **Quit** in the app's menu and open Proofread Hotkey from the Applications folder again.
 
 To uninstall: click the app's icon in the menu bar and choose **Start at login** so that the check mark next to it disappears. Then choose **Quit** in the same menu and move Proofread Hotkey from the Applications folder to the Trash. Three things stay on the disk, and you can delete them too: the folder `proofread-hotkey` in your home folder, the log file `~/Library/Logs/ProofreadHotkey.log` and, if you changed the rules, the file `prompt.txt` in the folder `~/Library/Application Support/Proofread Hotkey` (the section "Change the rules of proofreading" tells how to open this folder).
 
@@ -139,7 +160,8 @@ To uninstall: click the app's icon in the menu bar and choose **Start at login**
 - **Nothing happens when I press the shortcut.** Check that the icon is in the menu bar. If it is not, open Proofread Hotkey from the Applications folder. If the icon is there, another app may use the same shortcut: choose another one in the menu.
 - **The window says "The `claude` command was not found…" (or the same about `codex`).** Install Claude Code or Codex CLI and sign in, as the section "What you need" says. Then press the shortcut again.
 - **The window says "Claude could not check the text." (or the same about Codex).** Open the Terminal app, type `claude` (or `codex`) and press Return. You will see whether you are signed in and whether your subscription is active.
-- **The app checked an old text.** If you copy the text yourself: you pressed the shortcut without copying the new text. Copy first. If you let the app press Command + C for you: choose **Quit** in the menu and open the app again. If that does not help, macOS forgot the permission: open System Settings → Privacy & Security → Accessibility, remove Proofread Hotkey with the minus button and choose **Take the selected text without ⌘C: allow…** in the app's menu again.
+- **The app checked an old text.** If you copy the text yourself: you pressed the shortcut without copying the new text. Copy first. If you gave the app the Accessibility permission: choose **Quit** in the menu and open the app again. If that does not help, macOS forgot the permission: do the four steps from "Update and uninstall".
+- **The window says "Fixed and copied" instead of "Fixed and pasted".** Paste the corrected text yourself (Command + V). The app does not paste when you changed the selection, typed over it or switched apps during the check, and in code editors when nothing was selected (see "What happens when you press the shortcut"). If it never pastes anywhere, the app has no Accessibility permission, or macOS forgot it: do the four steps from "Update and uninstall".
 - **The window says "The text is too long…".** The app takes texts up to 6000 characters. Check a longer text in parts.
 
 ## License

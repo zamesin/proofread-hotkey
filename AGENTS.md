@@ -2,7 +2,7 @@
 
 The person asked you to install this app on their Mac. Do every step below yourself, in order. Ask the person only where a step says so. At the end, tell them the short message from the last step.
 
-Proofread Hotkey is a macOS menu-bar app: a global keyboard shortcut sends the copied (or selected) text to the Claude Code CLI or the Codex CLI that is already signed in on this Mac, puts the corrected text into the clipboard and shows a small window with the list of edits. What it does and how it looks is described in `README.md`.
+Proofread Hotkey is a macOS menu-bar app: a global keyboard shortcut sends the selected (or copied) text to the Claude Code CLI or the Codex CLI that is already signed in on this Mac, puts the corrected text in place of the selection (if it has not changed) and into the clipboard, and shows a small window with the list of edits. What it does and how it looks is described in `README.md`.
 
 ## Steps
 
@@ -22,18 +22,18 @@ Proofread Hotkey is a macOS menu-bar app: a global keyboard shortcut sends the c
    - If `status` is not 0, another app holds the shortcut. Tell the person to pick another one: menu-bar icon → "Hotkey… Change…".
    - The app uses Claude when both are found. To choose the engine for the person: `defaults write io.github.zamesin.proofread-hotkey engine codex` (or `claude`).
 
-5. **Test it for real.** This runs one proofreading through the person's subscription and overwrites their clipboard, which is fine at install time:
+5. **Test it for real.** This runs one proofreading through the person's subscription and overwrites their clipboard, which is fine at install time. Check first: if the start line in the log says `accessibility=true`, or the person already turned on the Accessibility switch, skip this test, because the app would then take the selection from the window in front (your terminal) instead of the clipboard. Otherwise:
    - `printf '%s' "me and him goes to school yesterday" | pbcopy`
    - Trigger the same code as the shortcut (the app listens for this notification):
      `osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSDistributedNotificationCenter.defaultCenter.postNotificationNameObjectUserInfoDeliverImmediately("io.github.zamesin.proofread-hotkey.run", $(), $(), true)'`
    - Wait up to 60 seconds, checking `tail -5 ~/Library/Logs/ProofreadHotkey.log`. Success is a line `engine=… exit=0` followed by `toast shown state=result`, and `pbpaste` printing a corrected sentence such as "He and I went to school yesterday."
    - If the log shows `toast shown state=message` instead, the engine failed. The log has only `engine error: exit=…`; to see the reason, run the CLI yourself, for example `echo hi | claude -p`. The usual reason is that the CLI is not signed in: tell the person to run `claude` (or `codex login`) in a terminal and sign in, then repeat this step.
 
-6. **Offer the one optional permission.** Ask the person: "Do you want to select a text and press the shortcut, without copying it first? This needs the Accessibility permission." If yes, tell them: click the app's icon in the menu bar → "Take the selected text without ⌘C: allow…" → turn on the switch next to Proofread Hotkey in System Settings. You cannot grant this permission for them.
+6. **Explain the one optional permission.** On its first start the app asked macOS for the Accessibility permission, so the person may already see a macOS window about it. With the permission they select a text, press the shortcut, and the corrected text replaces the selection. Without it they copy the text, press the shortcut and paste the fix themselves. If they want it, tell them: turn on the switch next to Proofread Hotkey in System Settings → Privacy & Security → Accessibility (if the macOS window is gone: click the app's icon in the menu bar → "Take the selected text and paste the fix: allow…"). You cannot grant this permission for them. Do not test the paste yourself: it presses Command + C and Command + V in whatever window the person is working in.
 
 7. **Tell the person, in their language, briefly:**
    - The app is installed and runs; its icon (lines of text with a check mark) is in the menu bar.
-   - How to use it: copy a text, press Command + Shift + ; , paste the corrected text. The window in the top-right corner shows what changed and closes after 5 seconds; it stays while the mouse pointer is over it.
+   - How to use it: with the permission, select a text and press Command + Shift + ; — the corrected text replaces the selection. Without the permission, copy a text, press the shortcut and paste the corrected text. The window in the top-right corner shows what changed and closes after 5 seconds; it stays while the mouse pointer is over it.
    - Which engine it uses (Claude or Codex), and that it can be changed in the menu.
    - The app now starts by itself when they log in to the Mac; "Start at login" in the menu turns this off.
    - The shortcut and the proofreading rules can be changed in the menu ("Hotkey… Change…", "Edit the prompt…").
@@ -44,4 +44,4 @@ Proofread Hotkey is a macOS menu-bar app: a global keyboard shortcut sends the c
 - The person's own proofreading rules: `~/Library/Application Support/Proofread Hotkey/prompt.txt`. If the person wants other rules (for example explanations in their language), create or edit this file. Start from the built-in text: it is `defaultPrompt` in `Sources/main.swift`. Keep the two-part answer format with the `===CHANGES===` line.
 - Update: `git pull` in the repository folder, then `./install.sh`. The build is signed ad hoc, so after an update the Accessibility permission must be given again (remove the old line in System Settings → Privacy & Security → Accessibility, then allow again from the app's menu).
 - Uninstall, in this order: first `"/Applications/Proofread Hotkey.app/Contents/MacOS/ProofreadHotkey" --remove-login-item` (macOS keeps the "start at login" record after the app is deleted, so remove it while the app still exists), then `pkill -x ProofreadHotkey`, then delete the app from `/Applications` (or `~/Applications`), and optionally `defaults delete io.github.zamesin.proofread-hotkey`.
-- Never paste, send or publish the corrected text for the person. The app only puts it into the clipboard.
+- Never send or publish the corrected text for the person. The app only replaces the selected text in the field (when the same text is still selected in the same app) and puts the corrected text into the clipboard; it never presses Return or a send button.

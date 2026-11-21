@@ -1,7 +1,8 @@
 // Proofread Hotkey — a tiny macOS menu-bar app.
 // Global hotkey → selected text (or the clipboard) → your own Claude Code or Codex CLI → corrected text in the
-// clipboard + a small window in the top-right corner that shows what changed and why.
-// It never pastes or sends anything anywhere, and the window never takes focus.
+// clipboard, in place of the selection (if it has not changed) + a small window in the top-right corner that shows
+// what changed and why. It never sends anything anywhere: it only replaces the selected text in the field.
+// The window never takes focus.
 import AppKit
 import Carbon.HIToolbox
 import ServiceManagement
@@ -260,37 +261,207 @@ final class HotKey {
 
 // MARK: - Where the text comes from
 
-/// Selected text: the app presses ⌘C in the active window itself (needs the Accessibility permission).
-/// Without the permission, or with nothing selected, it takes what is already in the clipboard.
-func captureText(done: @escaping (_ text: String, _ fromSelection: Bool) -> Void) {
+/// A field on a web page (Chrome, Safari, Electron apps).
+func insideWebPage(_ element: AXUIElement) -> Bool {
+  var el = element
+  for _ in 0..<40 {
+    var role: CFTypeRef?
+    if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role) == .success, (role as? String) == "AXWebArea" { return true }
+    var parent: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parent) == .success,
+          let p = parent, CFGetTypeID(p) == AXUIElementGetTypeID() else { return false }
+    el = p as! AXUIElement
+  }
+  return false
+}
+
+/// The selected text in the field with the text cursor, read through the Accessibility API. The clipboard is not touched, no keys are pressed.
+func selectedText(inAppWithPID pid: pid_t) -> String? {
+  let app = AXUIElementCreateApplication(pid)
+  AXUIElementSetMessagingTimeout(app, 0.5)
+  func read() -> String? {
+    var focused: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID() else { return nil }
+    var selected: CFTypeRef?
+    guard !insideWebPage(el as! AXUIElement) else { return nil } // on a web page this text loses empty lines and line breaks: take it with ⌘C instead
+    guard AXUIElementCopyAttributeValue(el as! AXUIElement, kAXSelectedTextAttribute as CFString, &selected) == .success,
+          let text = selected as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    return text
+  }
+  return read()
+}
+
+/// Empty lines as the person typed them: rich text fields copy one empty line as 3 or 4 line breaks, and on paste every break becomes a line again. At most one empty line in a row is kept.
+func tidyLineBreaks(_ s: String) -> String {
+  var t = s.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    .replacingOccurrences(of: "\u{2028}", with: "\n").replacingOccurrences(of: "\u{2029}", with: "\n")
+  t = t.replacingOccurrences(of: "[ \\t\\u00A0]+\n", with: "\n", options: .regularExpression) // spaces at the end of lines
+  t = t.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+  return t.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+/// Where the checked text was. If it was selected in a field, the corrected text goes back there.
+enum TextSource {
+  case field(AXUIElement, original: String) // the selection was read straight from the field
+  case copied(pid: pid_t, original: String) // the selection was taken by pressing ⌘C (pages in Chrome and similar)
+  case clipboard // the text that was already in the clipboard
+  var fromSelection: Bool { if case .clipboard = self { return false } else { return true } }
+  var name: String {
+    switch self {
+    case .field: return "field"
+    case .copied: return "copied"
+    case .clipboard: return "clipboard"
+    }
+  }
+}
+
+/// Waits until the modifier keys are released: otherwise the active app sees another shortcut, not ⌘C / ⌘V.
+func waitForModifiersUp(alsoCommand: Bool) {
+  var flags: CGEventFlags = [.maskShift, .maskAlternate, .maskControl]
+  if alsoCommand { flags.insert(.maskCommand) }
+  let deadline = Date().addingTimeInterval(0.8)
+  while Date() < deadline, !CGEventSource.flagsState(.combinedSessionState).intersection(flags).isEmpty { usleep(20_000) }
+}
+
+/// Presses ⌘ and a key in the active app (keyboard only, the mouse is never touched).
+func pressCommand(_ key: Int) {
+  let src = CGEventSource(stateID: .hidSystemState)
+  for down in [true, false] {
+    let e = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(key), keyDown: down)
+    e?.flags = .maskCommand
+    e?.post(tap: .cghidEventTap)
+  }
+}
+
+/// Presses ⌘C and waits for the clipboard to change. true — the active app copied something.
+func copySelection() -> Bool {
+  let pb = NSPasteboard.general
+  let before = pb.changeCount
+  pressCommand(kVK_ANSI_C)
+  let until = Date().addingTimeInterval(0.6)
+  while Date() < until, pb.changeCount == before { usleep(20_000) }
+  return pb.changeCount != before
+}
+
+/// Where the text comes from (needs the Accessibility permission): first the selection in the active field,
+/// then, if that fails, the app presses ⌘C itself. Without the permission, or with nothing selected, it takes what is already in the clipboard.
+func captureText(done: @escaping (_ text: String, _ source: TextSource) -> Void) {
   DispatchQueue.global(qos: .userInitiated).async {
+    let front = NSWorkspace.shared.frontmostApplication
+    if AXIsProcessTrusted(), let front, front.processIdentifier != getpid() {
+      let app = AXUIElementCreateApplication(front.processIdentifier)
+      AXUIElementSetMessagingTimeout(app, 0.5)
+      var focused: CFTypeRef?
+      if let text = selectedText(inAppWithPID: front.processIdentifier),
+         AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+         let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID() {
+        DispatchQueue.main.async { done(text, .field(el as! AXUIElement, original: text)) }
+        return
+      }
+    }
     let pb = NSPasteboard.general
-    var fromSelection = false
+    var copied = false
     let previous = pb.string(forType: .string) // what was in the clipboard before our ⌘C
     if AXIsProcessTrusted() {
-      // wait until ⇧ ⌥ ⌃ of the hotkey are released: otherwise the active app sees another shortcut, not ⌘C
-      let deadline = Date().addingTimeInterval(0.8)
-      while Date() < deadline, !CGEventSource.flagsState(.combinedSessionState).intersection([.maskShift, .maskAlternate, .maskControl]).isEmpty { usleep(20_000) }
-      let before = pb.changeCount
-      let src = CGEventSource(stateID: .hidSystemState)
-      for down in [true, false] {
-        let e = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(kVK_ANSI_C), keyDown: down)
-        e?.flags = .maskCommand
-        e?.post(tap: .cghidEventTap)
-      }
-      let until = Date().addingTimeInterval(0.6)
-      while Date() < until, pb.changeCount == before { usleep(20_000) }
-      fromSelection = pb.changeCount != before
+      waitForModifiersUp(alsoCommand: false)
+      copied = copySelection()
     }
     var text = pb.string(forType: .string) ?? ""
-    if fromSelection, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let previous {
+    if copied, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let previous {
       // nothing was selected and the active app put an empty or non-text item into the clipboard: put the earlier text back and check it
       pb.clearContents()
       pb.setString(previous, forType: .string)
       text = previous
-      fromSelection = false
+      copied = false
     }
-    DispatchQueue.main.async { done(text, fromSelection) }
+    let source: TextSource = copied && front != nil ? .copied(pid: front!.processIdentifier, original: text) : .clipboard
+    DispatchQueue.main.async { done(text, source) }
+  }
+}
+
+/// There is no real selection: VS Code, Cursor and JetBrains apps copy the whole line on ⌘C when nothing is selected.
+/// Pasting that text would duplicate the line, so the app does not paste it.
+func copiedWithoutSelection(pid: pid_t, copied: String) -> Bool {
+  // the VS Code / Cursor mark: under its own name or inside the shared Chromium block (strings there are UTF-16LE)
+  let mark = "\"isFromEmptySelection\":true"
+  let pb = NSPasteboard.general
+  if let vs = pb.string(forType: NSPasteboard.PasteboardType("vscode-editor-data")),
+     vs.replacingOccurrences(of: " ", with: "").contains(mark) { return true }
+  if let blob = pb.data(forType: NSPasteboard.PasteboardType("org.chromium.web-custom-data")) {
+    let texts = [String(data: blob, encoding: .utf16LittleEndian), String(decoding: blob, as: UTF8.self)].compactMap { $0 }
+    if texts.contains(where: { $0.replacingOccurrences(of: " ", with: "").contains(mark) }) { return true }
+  }
+  // code editors copy the whole line with a line break at the end when nothing is selected
+  let editors = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.todesktop.230313mzl4w4u92", "com.exafunction.windsurf", "com.vscodium", "dev.zed.Zed"]
+  if let id = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+     editors.contains(id) || id.hasPrefix("com.jetbrains.") || id.hasPrefix("com.google.android.studio"),
+     copied.hasSuffix("\n") { return true }
+  let app = AXUIElementCreateApplication(pid)
+  var focused: CFTypeRef?
+  var range: CFTypeRef?
+  if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+     let el = focused, CFGetTypeID(el) == AXUIElementGetTypeID(),
+     AXUIElementCopyAttributeValue(el as! AXUIElement, kAXSelectedTextRangeAttribute as CFString, &range) == .success,
+     let r = range, CFGetTypeID(r) == AXValueGetTypeID() {
+    var cf = CFRange()
+    if AXValueGetValue(r as! AXValue, .cfRange, &cf), cf.length == 0 { return true }
+  }
+  return false
+}
+
+/// Puts the corrected text in place of the selection — only if the same text is still selected there
+/// and the person has not switched to another app. The corrected text stays in the clipboard in any case.
+/// It never sends anything: it only replaces the text in the field. done(true) — the text was pasted.
+func putBack(_ fixed: String, into source: TextSource, done: @escaping (Bool) -> Void) {
+  DispatchQueue.global(qos: .userInitiated).async {
+    let pb = NSPasteboard.general
+    func setClipboard() { pb.clearContents(); pb.setString(fixed, forType: .string) }
+    // keep the spaces and line breaks at the edges of the selection: otherwise the corrected text sticks to its neighbours
+    func withEdges(of original: String) -> String {
+      let lead = original.prefix { $0.isWhitespace }
+      let trail = String(original.reversed().prefix { $0.isWhitespace }.reversed())
+      return lead.count == original.count ? fixed : String(lead) + fixed + trail
+    }
+    var ok = false
+    switch source {
+    case .clipboard:
+      setClipboard()
+    case let .field(el, original):
+      setClipboard()
+      var pid: pid_t = 0
+      AXUIElementGetPid(el, &pid)
+      let app = AXUIElementCreateApplication(pid)
+      AXUIElementSetMessagingTimeout(app, 0.5)
+      var focused: CFTypeRef?
+      var selected: CFTypeRef?
+      if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+         AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+         let now = focused, CFEqual(now, el),
+         AXUIElementCopyAttributeValue(el, kAXSelectedTextAttribute as CFString, &selected) == .success,
+         (selected as? String) == original {
+        ok = AXUIElementSetAttributeValue(el, kAXSelectedTextAttribute as CFString, withEdges(of: original) as CFString) == .success
+      }
+    case let .copied(pid, original):
+      // copy the selection once more: paste only if the same text is still selected
+      if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        waitForModifiersUp(alsoCommand: true)
+        if copySelection(), tidyLineBreaks(pb.string(forType: .string) ?? "") == tidyLineBreaks(original),
+           !copiedWithoutSelection(pid: pid, copied: pb.string(forType: .string) ?? ""),
+           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+          pb.clearContents()
+          pb.setString(withEdges(of: original), forType: .string)
+          let mine = pb.changeCount
+          usleep(50_000)
+          if pb.changeCount == mine { // nobody wrote to the clipboard in these 50 ms (for example, the clipboard shared with an iPhone)
+            pressCommand(kVK_ANSI_V)
+            ok = true
+          }
+        }
+      }
+      if !ok { setClipboard() }
+    }
+    DispatchQueue.main.async { done(ok) }
   }
 }
 
@@ -298,7 +469,7 @@ func captureText(done: @escaping (_ text: String, _ fromSelection: Bool) -> Void
 
 enum Screen {
   case loading(source: String, fromSelection: Bool, engine: Engine)
-  case result(before: String, after: String, changes: [Change])
+  case result(before: String, after: String, changes: [Change], inserted: Bool)
   case message(String, isError: Bool)
 
   var name: String {
@@ -467,9 +638,9 @@ final class Toast {
       stack.addArrangedSubview(row)
       stack.addArrangedSubview(label(styled(fromSelection ? "Selected text:" : "Text from the clipboard:", size: 12, color: gray)))
       stack.addArrangedSubview(label(styled(source, color: gray), maxLines: 4))
-    case let .result(before, after, changes):
+    case let .result(before, after, changes, inserted):
       let same = before == after
-      stack.addArrangedSubview(label(styled(same ? "No edits needed — copied" : "Fixed and copied", size: 14, bold: true, color: green), narrower: ringRoom))
+      stack.addArrangedSubview(label(styled(same ? "No edits needed — copied" : inserted ? "Fixed and pasted" : "Fixed and copied", size: 14, bold: true, color: green), narrower: ringRoom))
       stack.addArrangedSubview(label(same ? styled(after) : highlighted(after, against: before, background: mark), maxLines: textLines))
       if !same, !changes.isEmpty {
         stack.addArrangedSubview(label(styled("What changed", size: 14, bold: true)))
@@ -593,6 +764,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationDidFinishLaunching(_ note: Notification) {
     if NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).count > 1 { NSApp.terminate(nil); return }
+    AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5) // a frozen app holds us no longer than half a second per question
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     statusItem.button?.image = NSImage(systemSymbolName: "text.badge.checkmark", accessibilityDescription: "Proofread Hotkey")
     let menu = NSMenu()
@@ -612,6 +784,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
       defaults.set(true, forKey: "launchedBefore")
       if Bundle.main.bundlePath.contains("/Applications/") { try? SMAppService.mainApp.register() }
     }
+    if !AXIsProcessTrusted(), !defaults.bool(forKey: "accessibilityAsked") {
+      // ask for the permission once: without it the app cannot see the selected text and takes the text from the clipboard
+      defaults.set(true, forKey: "accessibilityAsked")
+      AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+    }
     DispatchQueue.global().async {
       let found = Engine.allCases.filter { Shell.find($0.binary) != nil }.map(\.rawValue)
       log("start version=\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?") accessibility=\(AXIsProcessTrusted()) enginesFound=\(found) engine=\(currentEngine().rawValue)")
@@ -621,7 +798,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if found.isEmpty {
           self.toast.show(.message("Proofread Hotkey needs Claude Code or Codex CLI on this Mac. Install one of them, sign in, then press \(self.shortcut.label).", isError: true), seconds: 10)
         } else if firstRun {
-          self.toast.show(.message("Proofread Hotkey is running. Copy a text and press \(self.shortcut.label).", isError: false), seconds: 6)
+          self.toast.show(.message("Proofread Hotkey is running. Select a text and press \(self.shortcut.label).", isError: false), seconds: 6)
         }
       }
     }
@@ -646,7 +823,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     add("Checks with: \(currentEngine() == .claude ? "Claude" : "Codex")", nil).submenu = engines
     add("Edit the prompt…", #selector(editPrompt))
-    if !AXIsProcessTrusted() { add("Take the selected text without ⌘C: allow…", #selector(askAccessibility)) }
+    if !AXIsProcessTrusted() { add("Take the selected text and paste the fix: allow…", #selector(askAccessibility)) }
     add("Start at login", #selector(toggleLogin), on: SMAppService.mainApp.status == .enabled)
     menu.addItem(.separator())
     add("Quit", #selector(quit))
@@ -660,10 +837,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard !busy else { return }
     busy = true
     let engine = currentEngine()
-    captureText { [weak self] raw, fromSelection in
+    captureText { [weak self] raw, source in
       guard let self else { return }
-      let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-      log("run chars=\(text.count) fromSelection=\(fromSelection)")
+      let text = tidyLineBreaks(raw)
+      log("run chars=\(text.count) source=\(source.name)")
       guard !text.isEmpty else {
         self.busy = false
         self.toast.show(.message(AXIsProcessTrusted() ? "No text. Select a text and press \(self.shortcut.label)." : "No text. Copy a text (⌘C) and press \(self.shortcut.label).", isError: true), seconds: showSeconds)
@@ -674,15 +851,24 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         self.toast.show(.message("The text is too long: \(text.count) characters, the limit is \(maxChars).", isError: true), seconds: showSeconds)
         return
       }
-      self.toast.show(.loading(source: text, fromSelection: fromSelection, engine: engine), seconds: nil)
+      self.toast.show(.loading(source: text, fromSelection: source.fromSelection, engine: engine), seconds: nil)
       proofread(text, engine: engine) { result in
-        self.busy = false
         switch result {
         case let .success(answer):
-          NSPasteboard.general.clearContents()
-          NSPasteboard.general.setString(answer.text, forType: .string)
-          self.toast.show(.result(before: text, after: answer.text, changes: answer.changes), seconds: showSeconds)
+          let fixed = tidyLineBreaks(answer.text)
+          guard !fixed.isEmpty else {
+            self.busy = false
+            self.toast.show(.message("The answer came back without text. Try again.", isError: true), seconds: 8)
+            return
+          }
+          // no edits: nothing to paste, the text simply goes to the clipboard
+          putBack(fixed, into: fixed == text ? .clipboard : source) { inserted in
+            self.busy = false
+            log("put back inserted=\(inserted)")
+            self.toast.show(.result(before: text, after: fixed, changes: answer.changes, inserted: inserted), seconds: showSeconds)
+          }
         case let .failure(failure):
+          self.busy = false
           self.toast.show(.message(failure.message, isError: true), seconds: 8)
         }
       }
